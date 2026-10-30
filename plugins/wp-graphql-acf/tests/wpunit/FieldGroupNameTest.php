@@ -61,6 +61,57 @@ class FieldGroupNameTest extends \Tests\WPGraphQL\Acf\WPUnit\WPGraphQLAcfTestCas
 	}
 
 	/**
+	 * Regression test for wp-graphql/wp-graphql#4563.
+	 *
+	 * A field group is added to each of its GraphQL types as a field named after the group. When
+	 * that name is already a field on the type, the existing field wins and the group is skipped
+	 * on that type with a debug message.
+	 */
+	public function testFieldGroupDoesNotReplaceExistingFieldWithSameName(): void {
+		$this->register_acf_field(
+			[
+				'type'               => 'text',
+				'name'               => 'text',
+				'graphql_field_name' => 'text',
+			],
+			[
+				'graphql_field_name' => 'Title',
+			]
+		);
+
+		$actual = $this->graphql(
+			[
+				'query' => '{ __type( name: "Post" ) { interfaces { name } fields { name type { name } } } }',
+			]
+		);
+
+		codecept_debug( $actual );
+
+		$this->assertArrayNotHasKey( 'errors', $actual );
+
+		$title_type = null;
+		foreach ( $actual['data']['__type']['fields'] as $field ) {
+			if ( 'title' === $field['name'] ) {
+				$title_type = $field['type']['name'];
+			}
+		}
+
+		$this->assertSame( 'String', $title_type );
+		$this->assertNotContains( 'WithAcfTitle', array_column( $actual['data']['__type']['interfaces'], 'name' ) );
+
+		$debug_message = null;
+		foreach ( $actual['extensions']['debug'] ?? [] as $debug ) {
+			if ( 'title' === ( $debug['field_name'] ?? null ) && 'Post' === ( $debug['type_name'] ?? null ) ) {
+				$debug_message = $debug['message'];
+			}
+		}
+
+		$this->assertNotNull( $debug_message );
+		$this->assertStringContainsString( 'ACF Test Group', $debug_message );
+		$this->assertStringContainsString( 'GraphQL Type Name', $debug_message );
+	}
+
+	/**
 	 * Widest surface: the schema a client builds from an introspection that leaves out deprecated
 	 * fields is still valid, with a flexible content field in it.
 	 */
