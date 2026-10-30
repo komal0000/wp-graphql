@@ -753,6 +753,37 @@ class Registry {
 	}
 
 	/**
+	 * Whether a GraphQL type already has a field with the given name, either in its own config
+	 * (fields or connections) or on one of the interfaces applied to it.
+	 *
+	 * Fields added to the type itself with register_graphql_field() are not seen, since they are
+	 * only known once the type's fields are built, which needs its interfaces first.
+	 *
+	 * @param array<string,mixed> $config     The config of the type.
+	 * @param array<mixed>        $interfaces The interfaces applied to the type.
+	 * @param string              $field_name The field name to look for.
+	 */
+	protected function type_has_field( array $config, array $interfaces, string $field_name ): bool {
+		foreach ( [ 'fields', 'connections' ] as $key ) {
+			if ( isset( $config[ $key ] ) && is_array( $config[ $key ] ) && array_key_exists( $field_name, $config[ $key ] ) ) {
+				return true;
+			}
+		}
+
+		foreach ( $interfaces as $interface ) {
+			if ( is_string( $interface ) ) {
+				$interface = $this->type_registry->get_type( $interface );
+			}
+
+			if ( $interface instanceof \GraphQL\Type\Definition\InterfaceType && $interface->hasField( $field_name ) ) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
 	 * Ensure nested types (clone, group, flexible_content) for a field group are registered
 	 * before the parent type. This prevents "non-existent Type" errors when the schema
 	 * validates field return types during introspection.
@@ -854,8 +885,42 @@ class Registry {
 				}
 
 				// If the field group has locations defined (Types to be added to)
-				// Add the WithAcf$FieldGroup Interface to the corresponding graphql_types
-				register_graphql_interfaces_to_types( [ $with_field_group_interface_name ], $locations );
+				// Add the WithAcf$FieldGroup Interface to the corresponding graphql_types,
+				// except types that already have a field with the same name: existing fields win.
+				$location_keys = array_map( 'strtolower', $locations );
+				add_filter(
+					'graphql_type_interfaces',
+					function ( $interfaces, $config ) use ( $location_keys, $with_field_group_interface_name, $field_name, $acf_field_group ) {
+						$interfaces = is_array( $interfaces ) ? $interfaces : [];
+						$type_name  = $config['name'] ?? '';
+
+						if ( ! in_array( strtolower( $type_name ), $location_keys, true ) ) {
+							return $interfaces;
+						}
+
+						if ( $this->type_has_field( $config, $interfaces, $field_name ) ) {
+							graphql_debug(
+								sprintf(
+									// translators: %1$s is the ACF Field Group title, %2$s is the GraphQL type name, %3$s is the GraphQL field name.
+									__( 'The ACF Field Group "%1$s" was not added to the "%2$s" type because "%2$s" already has a field named "%3$s". Change the field group\'s "GraphQL Type Name" setting to a name that does not match an existing field.', 'wpgraphql-acf' ),
+									$acf_field_group['title'] ?? $field_name,
+									$type_name,
+									$field_name
+								),
+								[
+									'type'       => 'DUPLICATE_FIELD',
+									'type_name'  => $type_name,
+									'field_name' => $field_name,
+								]
+							);
+							return $interfaces;
+						}
+
+						return array_unique( array_merge( $interfaces, [ $with_field_group_interface_name ] ) );
+					},
+					10,
+					2
+				);
 			}
 
 			if ( ! $this->has_registered_field_group( $type_name . '_Fields' ) ) {
